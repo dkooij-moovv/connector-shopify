@@ -6,6 +6,7 @@ from odoo.addons.shopify_connector.lib.inventory import (
     apply_negative_policy,
     build_inventory_set_payload,
     diff_inventory_levels,
+    normalize_inventory_bulk_levels,
     quantity_for_basis,
     should_ignore_echo,
 )
@@ -58,4 +59,18 @@ class TestShopifyLibInventory(TransactionCase):
                     "compareQuantity": 7,
                 }
             ],
+        }
+
+    def test_bulk_levels_normalize_without_a_level_active_flag(self):
+        records = [
+            {"id": "gid://shopify/InventoryItem/1", "tracked": True},
+            {
+                "id": "gid://shopify/InventoryLevel/9",
+                "__parentId": "gid://shopify/InventoryItem/1",
+                "location": {"id": "gid://shopify/Location/2"},
+                "quantities": [{"name": "available", "quantity": 6}],
+            },
+        ]
+        assert normalize_inventory_bulk_levels(records) == {
+            ("gid://shopify/InventoryItem/1", "gid://shopify/Location/2"): 6
         }

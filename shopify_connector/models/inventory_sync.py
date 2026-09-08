@@ -463,8 +463,9 @@ class ShopifyProductVariantInventorySync(models.Model):
         if not item.get("tracked"):
             self.inventory_tracked = False
             return None
+        # Shopify only returns a level while the item is stocked at the location.
         level = item.get("inventoryLevel")
-        if not level or not level.get("isActive"):
+        if not level:
             return None
         return available_quantity(level)
 
