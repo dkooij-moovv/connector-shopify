@@ -428,7 +428,10 @@ class ShopifyOrderSync(models.Model):
             differences = line_diffs(
                 self._existing_line_snapshot(binding, sale_order),
                 [
-                    {"id": line["id"], "quantity": line["quantity"]}
+                    {
+                        "id": line["id"],
+                        "quantity": self._line_demand(instance, line),
+                    }
                     for line in order_data["lines"]
                 ],
             )
@@ -587,7 +590,8 @@ class ShopifyOrderSync(models.Model):
         for line_data in order_data["lines"]:
             incoming_ids.add(line_data["id"])
             line_binding = existing.get(line_data["id"])
-            if line_data["quantity"] <= 0:
+            demand = self._line_demand(instance, line_data)
+            if demand <= 0:
                 if line_binding:
                     line_binding.odoo_id.unlink()
                 continue
@@ -620,7 +624,7 @@ class ShopifyOrderSync(models.Model):
                 "order_id": sale_order.id,
                 "product_id": product.id,
                 "name": line_data["title"] or product.display_name,
-                "product_uom_qty": line_data["quantity"],
+                "product_uom_qty": demand,
                 "product_uom_id": product.uom_id.id,
                 "price_unit": selected_unit["amount"],
                 "discount": format(discount_percent, "f"),
@@ -655,6 +659,23 @@ class ShopifyOrderSync(models.Model):
             if identifier not in incoming_ids and not line_binding.is_shipping:
                 line_binding.odoo_id.unlink()
         self._apply_shipping_lines(binding, sale_order, instance, order_data, country)
+
+    def _line_demand(self, instance, line_data):
+        """Quantity to put on the Odoo sale line.
+
+        Normally the ordered quantity. When the instance is configured to
+        import outstanding quantity only, Shopify's ``unfulfilledQuantity``
+        is used instead so that already-shipped goods do not reappear as
+        open demand. ``None`` means Shopify did not report it (draft orders),
+        in which case the ordered quantity stands.
+        """
+        quantity = int(line_data["quantity"] or 0)
+        if not instance.import_open_quantity_only:
+            return quantity
+        outstanding = line_data.get("unfulfilled_quantity")
+        if outstanding is None:
+            return quantity
+        return min(int(outstanding), quantity)
 
     def _line_binding_values(self, line_data):
         allocations = line_data["discount_allocations"]
@@ -836,7 +857,21 @@ class ShopifyOrderSync(models.Model):
             taxes |= mapping.tax_id
         return taxes
 
+    def _has_reduced_lines(self, instance, order_data):
+        """True when outstanding-only import shrank at least one line."""
+        if not instance.import_open_quantity_only:
+            return False
+        return any(
+            self._line_demand(instance, line) != int(line["quantity"] or 0)
+            for line in order_data["lines"]
+        )
+
     def _verify_total(self, sale_order, currency, instance, order_data):
+        if self._has_reduced_lines(instance, order_data):
+            # Shopify's total covers the whole order including goods already
+            # shipped, so it cannot match an order that carries only what is
+            # still outstanding. The check still runs on untouched orders.
+            return
         sale_order.invalidate_recordset(["amount_total"])
         expected = self._shopify_expected_order_total(instance, order_data)
         difference = _exact_difference(sale_order.amount_total, expected)

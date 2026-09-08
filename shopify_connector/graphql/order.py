@@ -50,6 +50,7 @@ ORDER_FIELDS = f"""
         sku
         quantity
         currentQuantity
+        unfulfilledQuantity
         refundableQuantity
         isGiftCard
         variant {{ id sku }}

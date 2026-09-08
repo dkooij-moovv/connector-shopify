@@ -222,6 +222,7 @@
                             />
                         </group>
                         <group string="State and Risk">
+                            <field name="import_open_quantity_only" />
                             <field name="order_confirmation_policy" />
                             <field
                                 name="auto_confirm_paid"

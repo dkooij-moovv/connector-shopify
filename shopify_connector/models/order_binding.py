@@ -482,6 +482,20 @@ class ShopifyInstanceOrderConfig(models.Model):
         required=True,
         default="quotation",
     )
+    import_open_quantity_only = fields.Boolean(
+        string="Import Outstanding Quantity Only",
+        default=False,
+        help=(
+            "Import each order line with the quantity Shopify still reports as "
+            "unfulfilled instead of the ordered quantity, and skip lines that "
+            "are fully shipped.\n\n"
+            "Use this when Odoo is introduced on a store with fulfilment "
+            "history it never recorded: replaying those shipments as stock "
+            "moves would double-count against an opening balance that is "
+            "already net of them. Leave it off for a store where Odoo owns "
+            "fulfilment from the start."
+        ),
+    )
     auto_confirm_paid = fields.Boolean(default=True)
     auto_confirm_partially_paid = fields.Boolean(default=True)
     refund_uninvoiced_policy = fields.Selection(

@@ -155,6 +155,14 @@ def _normalise_line(payload: dict[str, Any], currency: str) -> dict[str, Any]:
         else payload.get("quantity") or 0
     )
     original_quantity = int(payload.get("quantity") or quantity)
+    # Shopify reports what is still owed on the line. ``None`` means the API did
+    # not supply it (draft orders, older payloads); that is not the same as 0.
+    unfulfilled = (
+        payload.get("unfulfilledQuantity")
+        if payload.get("unfulfilledQuantity") is not None
+        else payload.get("unfulfilled_quantity")
+    )
+    unfulfilled_quantity = None if unfulfilled is None else int(unfulfilled)
     unit = _money(
         payload,
         "originalUnitPriceSet",
@@ -230,6 +238,7 @@ def _normalise_line(payload: dict[str, Any], currency: str) -> dict[str, Any]:
         "sku": str(payload.get("sku") or variant.get("sku") or ""),
         "quantity": quantity,
         "original_quantity": original_quantity,
+        "unfulfilled_quantity": unfulfilled_quantity,
         "refundable_quantity": int(
             payload.get("refundableQuantity")
             if payload.get("refundableQuantity") is not None
