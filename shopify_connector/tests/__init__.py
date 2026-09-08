@@ -14,4 +14,5 @@ from . import test_lib_webhook
 from . import test_product_sync
 from . import test_webhook_controller
 from . import test_fulfillment_sync
+from . import test_graphql_api_version
 from . import test_operability
