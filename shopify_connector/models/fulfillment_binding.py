@@ -125,7 +125,11 @@ class ShopifyFulfillmentOrderLine(models.Model):
         "shopify.order.line",
         string="Shopify Order Line",
         index=True,
-        ondelete="restrict",
+        # An order line can legitimately disappear - a fully shipped line is
+        # dropped when the order is re-imported as outstanding-only. Blocking
+        # that delete strands the sale order; the Shopify line identity is
+        # preserved in order_line_shopify_id, so drop the link instead.
+        ondelete="set null",
     )
     order_line_shopify_id = fields.Char(readonly=True, index=True)
     total_quantity = fields.Integer(readonly=True)
