@@ -42,6 +42,30 @@ class TestShopifyLibOrder(TransactionCase):
             "currency": "EUR",
         }
 
+    def test_order_number_comes_from_graphql_number_field(self):
+        order = normalize_order_payload(
+            {
+                "id": "gid://shopify/Order/1",
+                "name": "#75658",
+                "number": 75658,
+                "currencyCode": "EUR",
+                "currentTotalPriceSet": bag("12.34", "11.37"),
+            }
+        )
+        assert order["number"] == "75658"
+
+    def test_rest_order_number_wins_over_the_rest_number_sequence(self):
+        order = normalize_order_payload(
+            {
+                "id": 10,
+                "name": "#1001",
+                "number": 1,
+                "order_number": 1001,
+                "currency": "USD",
+            }
+        )
+        assert order["number"] == "1001"
+
     def test_rest_webhook_uses_current_quantity_and_exact_discounted_total(self):
         order = normalize_order_payload(
             {

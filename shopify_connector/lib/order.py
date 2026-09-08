@@ -516,7 +516,9 @@ def normalize_order_payload(
     order = {
         "id": identifier,
         "name": str(payload.get("name") or ""),
-        "number": str(payload.get("orderNumber") or payload.get("order_number") or ""),
+        # REST payloads carry both: `order_number` matches ``name``, `number`
+        # is a separate sequence. GraphQL only returns `number`.
+        "number": str(payload.get("order_number") or payload.get("number") or ""),
         "created_at": payload.get("createdAt") or payload.get("created_at"),
         "updated_at": payload.get("updatedAt") or payload.get("updated_at"),
         "cancelled_at": payload.get("cancelledAt") or payload.get("cancelled_at"),
