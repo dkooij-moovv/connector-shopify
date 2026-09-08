@@ -626,6 +626,19 @@ class SaleOrderShopify(models.Model):
     shopify_tags = fields.Char(readonly=True, copy=False)
     shopify_note = fields.Text(readonly=True, copy=False)
 
+    def _prepare_confirmation_values(self):
+        """Keep the Shopify order date when confirming an imported order.
+
+        Odoo stamps ``date_order`` with the confirmation time, which is right
+        for a quotation that becomes an order but wrong for a marketplace
+        order: the customer ordered when they ordered. Importing then
+        confirming would otherwise rewrite every date to the import run.
+        """
+        values = super()._prepare_confirmation_values()
+        if self and all(order.shopify_binding_ids for order in self):
+            values.pop("date_order", None)
+        return values
+
     def action_release_shopify_risk_hold(self):
         risk_summary = self.env._("Shopify high-risk order")
         for order in self:
