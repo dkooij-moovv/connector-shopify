@@ -78,7 +78,7 @@ class ShopifyInstance(models.Model):
     product_pricelist_id = fields.Many2one(
         "product.pricelist",
         string="Shopify Product Pricelist",
-        required=True,
+        required=False,
         check_company=True,
         ondelete="restrict",
         help=(
