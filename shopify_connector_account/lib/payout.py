@@ -95,7 +95,8 @@ def normalize_transaction(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(payload.get("id") or ""),
         "type": str(payload.get("type") or "").upper(),
-        "display_type": str(payload.get("displayType") or ""),
+        # 2026-01 dropped ``displayType``; derive the label from the enum.
+        "display_type": str(payload.get("type") or "").replace("_", " ").title(),
         "source_type": str(payload.get("sourceType") or "").upper(),
         "source_id": str(payload.get("sourceId") or ""),
         "source_order_transaction_id": str(

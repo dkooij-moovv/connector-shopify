@@ -56,7 +56,6 @@ query ShopifyPaymentsTransactions(
       nodes {{
         id
         type
-        displayType
         sourceType
         sourceId
         sourceOrderTransactionId

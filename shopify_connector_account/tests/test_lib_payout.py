@@ -71,6 +71,7 @@ class TestShopifyLibPayout(TransactionCase):
         assert payout["fees"] == "3.005"
         assert payout["net"] == "96.995"
         assert transaction["amount"] == "100.000"
+        assert transaction["display_type"] == "Charge"
         assert transaction["fee"] == "3.005"
 
     def test_balanced_charge_refund_and_fee_plan(self):

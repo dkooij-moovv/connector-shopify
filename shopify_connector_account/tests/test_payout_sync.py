@@ -52,7 +52,6 @@ class TestShopifyPayoutSync(TransactionCase):
         values = {
             "id": f"gid://shopify/ShopifyPaymentsBalanceTransaction/{transaction_id}",
             "type": "ADJUSTMENT",
-            "displayType": "Adjustment",
             "sourceType": "ADJUSTMENT",
             "sourceId": "source-1",
             "sourceOrderTransactionId": "",
@@ -238,7 +237,7 @@ class TestShopifyPayoutSync(TransactionCase):
         self.assertIn("No reconciliation account", transaction.unmatched_reason)
 
         changed = self._transaction_payload(
-            "matching", payout, displayType="Reserve adjustment"
+            "matching", payout, type="RESERVE_ADJUSTMENT"
         )
         with patch.object(
             type(self.instance),
@@ -248,7 +247,7 @@ class TestShopifyPayoutSync(TransactionCase):
         ):
             self.instance._import_payout_transactions(payout)
         self.assertEqual(payout.transaction_ids, transaction)
-        self.assertEqual(transaction.display_type, "Reserve adjustment")
+        self.assertEqual(transaction.display_type, "Reserve Adjustment")
 
         payout.legacy_resource_id = False
         with self.assertRaisesRegex(PayoutPlanningError, "has no legacy ID"):
