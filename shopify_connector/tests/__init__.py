@@ -1,5 +1,6 @@
 from . import test_instance
 from . import test_customer_sync
+from . import test_order_drift_watermark
 from . import test_order_sync
 from . import test_inventory
 from . import test_lib_bulk

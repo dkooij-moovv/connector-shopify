@@ -99,24 +99,34 @@ class ShopifyInstanceOrderSync(models.Model):
         for instance in self.search(
             [("active", "=", True), ("state", "=", "connected")]
         ):
+            # Resume from where the last run got to, not from a fixed window.
+            # Shopify's search granularity is a day, so overlap by one to be
+            # safe on clock skew and on orders that changed mid-run; the digest
+            # check makes re-importing an unchanged order a no-op.
+            started = fields.Datetime.now()
+            since = fields.Date.to_date(
+                instance.order_drift_watermark
+            ) or fields.Date.context_today(instance)
+            since -= timedelta(days=1 if instance.order_drift_watermark else 2)
             instance.with_delay(
                 description=self.env._(
                     "Reconcile Shopify orders for %s", instance.name
                 ),
                 identity_key=f"shopify.orders.reconcile.{instance.id}",
             )._job_fetch_orders_bulk(
-                fields.Date.to_string(
-                    fields.Date.context_today(instance) - timedelta(days=2)
-                ),
+                fields.Date.to_string(since),
                 False,
                 date_field="updated_at",
             )
+            instance.order_drift_watermark = started
             instance._write_log(
                 entity="drift_orders",
                 direction="import",
                 level="info",
                 message=self.env._(
-                    "Daily order drift reconciliation queued with a two-day overlap."
+                    "Order drift reconciliation queued for everything updated "
+                    "since %s.",
+                    since,
                 ),
                 record=instance,
             )

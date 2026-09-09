@@ -482,6 +482,17 @@ class ShopifyInstanceOrderConfig(models.Model):
         required=True,
         default="quotation",
     )
+    order_drift_watermark = fields.Datetime(
+        string="Orders Reconciled Up To",
+        readonly=True, copy=False,
+        help=(
+            "How far the daily drift reconciliation has got. The next run asks "
+            "Shopify for every order updated since this moment, so a run that "
+            "is missed - laptop off, credentials expired, a week of holiday - "
+            "is caught up on the next one instead of being lost.\n\n"
+            "Empty means the cron falls back to a two-day window."
+        ),
+    )
     import_open_quantity_only = fields.Boolean(
         string="Import Outstanding Quantity Only",
         default=False,
