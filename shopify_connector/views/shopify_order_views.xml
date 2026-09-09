@@ -252,6 +252,14 @@
                                 class="oe_highlight"
                                 icon="fa-download"
                             />
+                            <button
+                                name="action_backfill_fulfillments"
+                                type="object"
+                                string="Backfill Fulfillments"
+                                icon="fa-truck"
+                                help="Import shipment records for the date range above.
+                                      Records only - no Odoo delivery is validated."
+                            />
                         </group>
                     </group>
                     <separator string="Tax Mappings" />

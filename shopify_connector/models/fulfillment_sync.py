@@ -9,6 +9,7 @@ from odoo.exceptions import UserError
 from odoo.fields import Command
 
 from ..graphql.fulfillment import (
+    fulfillments_bulk_query,
     FULFILLMENT_BY_ID_QUERY,
     FULFILLMENT_CANCEL_MUTATION,
     FULFILLMENT_CREATE_MUTATION,
@@ -16,6 +17,7 @@ from ..graphql.fulfillment import (
     FULFILLMENT_ORDER_RELEASE_HOLD_MUTATION,
     ORDER_FULFILLMENT_ORDERS_QUERY,
 )
+from ..lib.bulk import ShopifyBulkRunner
 from ..lib.client import ShopifyError
 from ..lib.fulfillment import (
     FulfillmentAllocationError,
@@ -815,7 +817,7 @@ class ShopifyExternalFulfillmentImport(models.Model):
         values = {
             "instance_id": instance.id,
             "shopify_id": fulfillment_id,
-            "order_binding_id": order_binding.id,
+            "order_binding_id": order_binding_id,
             "fulfillment_status": str(
                 payload.get("status") or webhook_payload.get("status") or ""
             ).upper(),
@@ -1010,3 +1012,151 @@ WEBHOOK_HANDLERS.update(
         "fulfillments/update": "_handle_fulfillments_update",
     }
 )
+
+
+class ShopifyInstanceFulfillmentBackfill(models.Model):
+    """Backfill shipment history that never arrived by webhook.
+
+    shopify.fulfillment records are only ever created by the fulfillments/create
+    webhook. An Odoo introduced onto a store with existing trading history - or
+    any install that cannot receive webhooks, such as one behind localhost -
+    therefore has no record of anything that shipped, and the table simply
+    stays empty rather than erroring.
+
+    This backfill is deliberately read-only with respect to stock. It records
+    what Shopify shipped and never validates an Odoo delivery: replaying
+    historic shipments against a stock balance that is already net of them
+    would double-count. Turning these records into deliveries is a separate,
+    later decision.
+    """
+
+    _inherit = "shopify.instance"
+
+    def action_backfill_fulfillments(self):
+        self.ensure_one()
+        if self.state != "connected":
+            raise UserError(
+                self.env._("Connect the Shopify instance before backfilling.")
+            )
+        self.with_delay(
+            description=self.env._("Backfill Shopify fulfillments for %s", self.name),
+            identity_key=(
+                f"shopify.fulfillments.backfill.{self.id}."
+                f"{self.order_import_date_from}.{self.order_import_date_to}"
+            ),
+        )._job_backfill_fulfillments(
+            fields.Date.to_string(self.order_import_date_from),
+            fields.Date.to_string(self.order_import_date_to),
+        )
+        return True
+
+    def _job_backfill_fulfillments(self, date_from=False, date_to=False):
+        self = self.sudo()
+        self.ensure_one()
+        if not self.active:
+            return 0
+        rows = [
+            row
+            for row in ShopifyBulkRunner(self._shopify_client()).run(
+                fulfillments_bulk_query(date_from, date_to)
+            )
+            if row.get("fulfillments")
+        ]
+        Order = self.env["shopify.order"]
+        Fulfillment = self.env["shopify.fulfillment"]
+        imported = skipped = 0
+        # Resolve bindings a batch at a time. A full store has tens of
+        # thousands of orders and preloading them all exhausts memory.
+        batch_size = 200
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start : start + batch_size]
+            order_gids = [str(row.get("id") or "") for row in batch]
+            bindings = {
+                item["shopify_id"]: item["id"]
+                for item in Order.search_read(
+                    [
+                        ("instance_id", "=", self.id),
+                        ("shopify_id", "in", order_gids),
+                        ("is_draft", "=", False),
+                    ],
+                    ["shopify_id"],
+                )
+            }
+            payloads = [
+                (row, payload)
+                for row in batch
+                for payload in row.get("fulfillments") or []
+            ]
+            existing = {
+                item["shopify_id"]: item["id"]
+                for item in Fulfillment.search_read(
+                    [
+                        ("instance_id", "=", self.id),
+                        (
+                            "shopify_id",
+                            "in",
+                            [str(p.get("id") or "") for _row, p in payloads],
+                        ),
+                    ],
+                    ["shopify_id"],
+                )
+            }
+            to_create = []
+            for row, payload in payloads:
+                binding_id = bindings.get(str(row.get("id") or ""))
+                if not binding_id:
+                    # The order itself is not imported yet; a later run picks
+                    # it up rather than creating an orphaned shipment.
+                    skipped += 1
+                    continue
+                values = self._fulfillment_backfill_values(binding_id, payload)
+                if not values:
+                    continue
+                record_id = existing.get(values["shopify_id"])
+                if record_id:
+                    Fulfillment.browse(record_id).write(values)
+                else:
+                    to_create.append(values)
+                imported += 1
+            if to_create:
+                Fulfillment.create(to_create)
+            self.env.cr.commit()
+            self.env.invalidate_all()
+        self._write_log(
+            entity="fulfillment",
+            direction="import",
+            level="info",
+            message=self.env._(
+                "Backfilled %(imported)s Shopify fulfillment(s); %(skipped)s "
+                "skipped because their order is not imported. No Odoo "
+                "delivery was validated.",
+                imported=imported,
+                skipped=skipped,
+            ),
+            record=self,
+        )
+        return imported
+
+    def _fulfillment_backfill_values(self, order_binding_id, payload):
+        shopify_id = str(payload.get("id") or "")
+        if not shopify_id:
+            return {}
+        tracking = (payload.get("trackingInfo") or [{}])[0] or {}
+        return {
+            "instance_id": self.id,
+            "company_id": self.company_id.id,
+            "order_binding_id": order_binding_id,
+            "shopify_id": shopify_id,
+            # origin marks who created the shipment, not its Shopify name.
+            "origin": "shopify",
+            "fulfillment_status": payload.get("status") or False,
+            "location_shopify_id": str((payload.get("location") or {}).get("id") or ""),
+            "tracking_number": tracking.get("number") or False,
+            "tracking_company": tracking.get("company") or False,
+            "tracking_url": tracking.get("url") or False,
+            "external_updated_at": _utc_datetime(payload.get("updatedAt")),
+            "last_sync_date": fields.Datetime.now(),
+            "state": "synced",
+            "error_message": False,
+            "raw_payload": payload,
+        }

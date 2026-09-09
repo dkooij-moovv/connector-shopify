@@ -140,3 +140,55 @@ mutation ShopifyFulfillmentCancel($id: ID!) {
   }
 }
 """
+
+
+def fulfillments_bulk_query(date_from=None, date_to=None) -> str:
+    """Bulk query for the fulfillments (shipment records) of each order.
+
+    Shopify has no top-level fulfillments query, so they are reached through
+    orders. Two API constraints shape this document and neither can be worked
+    around, so do not "improve" it without re-testing against the live API:
+
+    * ``Order.fulfillments`` is a LIST, not a connection, and Shopify rejects
+      a bulk query with "connection field within a list field". So
+      ``fulfillmentLineItems`` cannot be nested here.
+    * Routing around that via ``fulfillmentOrders { fulfillments { ... } }``
+      is all connections, but then ``fulfillmentLineItems`` sits at depth 3
+      and Shopify rejects "nesting depth greater than 2".
+
+    Line-level shipped quantities are therefore not fetched here. They are
+    already derivable: shopify.fulfillment.order.line carries total_quantity
+    and remaining_quantity, and shipped = total - remaining.
+
+    Because the list is inlined rather than paginated, ``first`` caps how many
+    fulfillments an order can report. 50 is far above any realistic split
+    shipment; orders that exceed it would need the per-order query.
+    """
+    from .order import _search_date
+
+    terms = []
+    if date_from:
+        terms.append(f"created_at:>={_search_date(date_from)}")
+    if date_to:
+        terms.append(f"created_at:<={_search_date(date_to)}")
+    search = " ".join(terms)
+    root = f'orders(query: "{search}")' if search else "orders"
+    return (
+        "{ "
+        + root
+        + """ { edges { node {
+        id
+        fulfillments(first: 50) {
+          id
+          name
+          createdAt
+          updatedAt
+          status
+          displayStatus
+          deliveredAt
+          estimatedDeliveryAt
+          trackingInfo { number company url }
+          location { id }
+        }
+      } } } }"""
+    )
