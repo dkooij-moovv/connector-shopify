@@ -28,6 +28,12 @@ from ..lib.order import (
 )
 from .webhook_event import WEBHOOK_HANDLERS
 
+# Overlap applied on every drift run. Small enough to stay cheap, large enough
+# to absorb clock skew between Odoo and Shopify and orders that changed while
+# the previous run was still reading. Duplicate input is harmless: the payload
+# digest makes re-importing an unchanged order a no-op.
+DRIFT_OVERLAP = timedelta(minutes=10)
+
 
 class ShopifyOrderImportError(UserError):
     """A recoverable Shopify order import error."""
@@ -99,26 +105,28 @@ class ShopifyInstanceOrderSync(models.Model):
         for instance in self.search(
             [("active", "=", True), ("state", "=", "connected")]
         ):
-            # Resume from where the last run got to, not from a fixed window.
-            # Shopify's search granularity is a day, so overlap by one to be
-            # safe on clock skew and on orders that changed mid-run; the digest
-            # check makes re-importing an unchanged order a no-op.
+            # Resume from where the last run finished, not from a fixed
+            # window. The overlap covers clock skew and orders that changed
+            # while the previous run was reading; re-importing an unchanged
+            # order is free because of the payload digest check.
             started = fields.Datetime.now()
-            since = fields.Date.to_date(
-                instance.order_drift_watermark
-            ) or fields.Date.context_today(instance)
-            since -= timedelta(days=1 if instance.order_drift_watermark else 2)
+            watermark = instance.order_drift_watermark
+            since = (
+                watermark - DRIFT_OVERLAP
+                if watermark
+                else started - timedelta(days=2)
+            )
             instance.with_delay(
                 description=self.env._(
                     "Reconcile Shopify orders for %s", instance.name
                 ),
                 identity_key=f"shopify.orders.reconcile.{instance.id}",
             )._job_fetch_orders_bulk(
-                fields.Date.to_string(since),
+                fields.Datetime.to_string(since),
                 False,
                 date_field="updated_at",
+                watermark=fields.Datetime.to_string(started),
             )
-            instance.order_drift_watermark = started
             instance._write_log(
                 entity="drift_orders",
                 direction="import",
@@ -132,7 +140,15 @@ class ShopifyInstanceOrderSync(models.Model):
             )
 
     def _job_fetch_orders_bulk(self, date_from=False, date_to=False,
-                               date_field="created_at"):
+                               date_field="created_at", watermark=False):
+        """Fetch a window of orders and queue one import job per order.
+
+        ``watermark``, when given, is written to the instance *after* every
+        order in the window has been queued. Advancing it any earlier - in the
+        cron, or per page - would let a failed fetch move the window past
+        records nobody processed, and those changes would never come back.
+        Failing here leaves the watermark alone and queue_job retries.
+        """
         self = self.sudo()
         self.ensure_one()
         if not self.active:
@@ -165,6 +181,8 @@ class ShopifyInstanceOrderSync(models.Model):
             ),
             record=self,
         )
+        if watermark:
+            self.order_drift_watermark = watermark
         return len(orders) + draft_count
 
     def _queue_draft_orders(self, date_from=False, date_to=False,
@@ -606,7 +624,7 @@ class ShopifyOrderSync(models.Model):
             demand = self._line_demand(instance, line_data)
             if demand <= 0:
                 if line_binding:
-                    line_binding.odoo_id.unlink()
+                    self._drop_line(line_binding.odoo_id)
                 continue
             product = self._line_product(instance, line_data)
             taxes = self._mapped_taxes(
@@ -672,6 +690,25 @@ class ShopifyOrderSync(models.Model):
             if identifier not in incoming_ids and not line_binding.is_shipping:
                 line_binding.odoo_id.unlink()
         self._apply_shipping_lines(binding, sale_order, instance, order_data, country)
+
+    def _drop_line(self, line):
+        """Remove a line that Shopify no longer owes.
+
+        Deleting works while the order is a quotation. Once it is confirmed
+        Odoo refuses, so the quantity goes to zero instead: the line stays as
+        a record of what was ordered, its stock move is cancelled, and it
+        stops counting as demand.
+
+        This is what a refunded or cancelled order looks like on reconciliation
+        - Shopify keeps reporting unfulfilledQuantity on a line it has zeroed
+        through currentQuantity, and only the second number means anything.
+        """
+        if not line:
+            return
+        if line.order_id.state in ("draft", "sent"):
+            line.unlink()
+        else:
+            line.with_context(shopify_order_import=True).product_uom_qty = 0
 
     def _line_demand(self, instance, line_data):
         """Quantity to put on the Odoo sale line.

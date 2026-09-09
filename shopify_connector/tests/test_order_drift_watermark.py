@@ -1,9 +1,10 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
+from unittest.mock import patch
 
 from odoo import fields
 from odoo.tests.common import TransactionCase
 
-from ..graphql.order import orders_bulk_query
+from ..graphql.order import _search_date, orders_bulk_query
 
 
 class TestShopifyOrderDriftWatermark(TransactionCase):
@@ -44,29 +45,104 @@ class TestShopifyOrderDriftWatermark(TransactionCase):
         with self.assertRaises(ValueError):
             orders_bulk_query("2026-09-01", date_field="processed_at")
 
+    def test_a_datetime_bound_keeps_its_time(self):
+        """A catch-up resumes from the minute, not from the start of the day."""
+        self.assertEqual(
+            _search_date(datetime(2026, 9, 9, 18, 32, 5)), "2026-09-09T18:32:05Z"
+        )
+        self.assertEqual(_search_date("2026-09-09"), "2026-09-09")
+
     def test_first_run_falls_back_to_a_two_day_window(self):
         self.instance.write({"state": "connected", "order_drift_watermark": False})
-        expected = fields.Date.context_today(self.instance) - timedelta(days=2)
-        self.assertEqual(self._queued_since(), fields.Date.to_string(expected))
+        since = fields.Datetime.from_string(self._queued_since())
+        self.assertLess(abs((fields.Datetime.now() - since).days - 2), 1)
 
     def test_a_missed_week_is_caught_up_not_lost(self):
-        self.instance.write({
-            "state": "connected",
-            "order_drift_watermark": fields.Datetime.now() - timedelta(days=7),
-        })
-        since = fields.Date.from_string(self._queued_since())
-        self.assertEqual(
-            (fields.Date.context_today(self.instance) - since).days, 8,
+        watermark = fields.Datetime.now() - timedelta(days=7)
+        self.instance.write({"state": "connected", "order_drift_watermark": watermark})
+        since = fields.Datetime.from_string(self._queued_since())
+        self.assertLess(
+            abs((fields.Datetime.now() - since).days - 7), 1,
             "a run missed for a week must reach back a week, not two days",
         )
 
-    def test_the_watermark_advances_after_a_run(self):
-        self.instance.write({
-            "state": "connected",
-            "order_drift_watermark": fields.Datetime.now() - timedelta(days=3),
-        })
+    def test_the_cron_does_not_advance_the_watermark_itself(self):
+        """Only the job may advance it, and only once the window is queued.
+
+        Advancing in the cron would move the window past records the fetch
+        never reached, and those changes would never come back.
+        """
+        before = fields.Datetime.now() - timedelta(days=3)
+        self.instance.write({"state": "connected", "order_drift_watermark": before})
         self._queued_since()
-        self.assertGreater(
-            self.instance.order_drift_watermark,
-            fields.Datetime.now() - timedelta(minutes=5),
+        self.assertEqual(
+            self.instance.order_drift_watermark, before,
+            "the cron advanced the watermark before the fetch had run",
         )
+
+    def test_a_failed_fetch_leaves_the_watermark_alone(self):
+        """Prefer processing twice over losing a change."""
+        before = fields.Datetime.now() - timedelta(days=3)
+        self.instance.write({"state": "connected", "order_drift_watermark": before})
+
+        def explodes(self, *args, **kwargs):
+            raise RuntimeError("Shopify unreachable")
+
+        with patch.object(type(self.instance), "_shopify_client", explodes):
+            with self.assertRaises(RuntimeError):
+                self.instance._job_fetch_orders_bulk(
+                    "2026-09-01 00:00:00", False,
+                    date_field="updated_at",
+                    watermark=fields.Datetime.to_string(fields.Datetime.now()),
+                )
+        self.assertEqual(self.instance.order_drift_watermark, before)
+
+    def test_the_overlap_is_applied_and_is_small(self):
+        """Ten minutes: enough for clock skew, not a whole day of re-reading."""
+        watermark = fields.Datetime.now() - timedelta(days=3)
+        self.instance.write({"state": "connected", "order_drift_watermark": watermark})
+        since = fields.Datetime.from_string(self._queued_since())
+        self.assertEqual(watermark - since, timedelta(minutes=10))
+
+
+class TestShopifyOutstandingDemand(TransactionCase):
+    """What Shopify still owes is not the same as what it never shipped.
+
+    unfulfilledQuantity keeps counting a line the customer has been refunded
+    for; currentQuantity is what survives refunds and cancellations. Open
+    demand is the smaller of the two.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.instance = cls.env["shopify.instance"].create({
+            "name": "Demand Shop",
+            "shop_url": "demand-shop.myshopify.com",
+            "access_token": "test-token",
+            "import_open_quantity_only": True,
+        })
+        cls.sync = cls.env["shopify.order"]
+
+    def _demand(self, quantity, unfulfilled):
+        return self.sync._line_demand(
+            self.instance, {"quantity": quantity, "unfulfilled_quantity": unfulfilled}
+        )
+
+    def test_nothing_shipped_yet_is_fully_owed(self):
+        self.assertEqual(self._demand(3, 3), 3)
+
+    def test_a_partial_shipment_leaves_the_remainder(self):
+        self.assertEqual(self._demand(3, 1), 1)
+
+    def test_a_refunded_line_is_owed_nothing(self):
+        """currentQuantity 0 with unfulfilledQuantity 1: refunded, never shipped."""
+        self.assertEqual(self._demand(0, 1), 0)
+
+    def test_a_missing_unfulfilled_quantity_falls_back_to_ordered(self):
+        """Draft orders carry no fulfilment data; absent is not the same as 0."""
+        self.assertEqual(self._demand(2, None), 2)
+
+    def test_the_flag_off_keeps_the_ordered_quantity(self):
+        self.instance.import_open_quantity_only = False
+        self.assertEqual(self._demand(3, 1), 3)

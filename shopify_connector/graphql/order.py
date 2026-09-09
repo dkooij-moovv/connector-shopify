@@ -186,13 +186,20 @@ query ShopifyReturn($id: ID!) {
 
 
 def _search_date(value: date | datetime | str | None) -> str:
+    """Format a bound for Shopify's search syntax.
+
+    A datetime keeps its time and is sent as UTC ISO8601, so a catch-up can
+    resume from the exact minute it left off instead of re-reading a whole
+    day. A plain date stays a date - that is what the historical import wants.
+    """
     if not value:
         return ""
     if isinstance(value, datetime):
-        return value.date().isoformat()
+        return value.strftime("%Y-%m-%dT%H:%M:%SZ")
     if isinstance(value, date):
         return value.isoformat()
-    return str(value)[:10]
+    text = str(value)
+    return text[:19].replace(" ", "T") + "Z" if len(text) > 10 else text[:10]
 
 
 def orders_bulk_query(
