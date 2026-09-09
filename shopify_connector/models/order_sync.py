@@ -109,6 +109,7 @@ class ShopifyInstanceOrderSync(models.Model):
                     fields.Date.context_today(instance) - timedelta(days=2)
                 ),
                 False,
+                date_field="updated_at",
             )
             instance._write_log(
                 entity="drift_orders",
@@ -120,13 +121,14 @@ class ShopifyInstanceOrderSync(models.Model):
                 record=instance,
             )
 
-    def _job_fetch_orders_bulk(self, date_from=False, date_to=False):
+    def _job_fetch_orders_bulk(self, date_from=False, date_to=False,
+                               date_field="created_at"):
         self = self.sudo()
         self.ensure_one()
         if not self.active:
             return 0
         records = ShopifyBulkRunner(self._shopify_client()).run(
-            orders_bulk_query(date_from, date_to)
+            orders_bulk_query(date_from, date_to, date_field)
         )
         orders = [
             row
@@ -141,7 +143,7 @@ class ShopifyInstanceOrderSync(models.Model):
                 ),
                 identity_key=f"shopify.order.import.{self.id}.{order['id']}",
             )._job_import_order_from_api(self.id, order["id"])
-        draft_count = self._queue_draft_orders(date_from, date_to)
+        draft_count = self._queue_draft_orders(date_from, date_to, date_field)
         self._write_log(
             entity="order",
             direction="import",
@@ -155,12 +157,13 @@ class ShopifyInstanceOrderSync(models.Model):
         )
         return len(orders) + draft_count
 
-    def _queue_draft_orders(self, date_from=False, date_to=False):
+    def _queue_draft_orders(self, date_from=False, date_to=False,
+                            date_field="created_at"):
         query_terms = []
         if date_from:
-            query_terms.append(f"created_at:>={str(date_from)[:10]}")
+            query_terms.append(f"{date_field}:>={str(date_from)[:10]}")
         if date_to:
-            query_terms.append(f"created_at:<={str(date_to)[:10]}")
+            query_terms.append(f"{date_field}:<={str(date_to)[:10]}")
         after = None
         count = 0
         while True:

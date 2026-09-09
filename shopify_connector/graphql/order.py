@@ -198,13 +198,23 @@ def _search_date(value: date | datetime | str | None) -> str:
 def orders_bulk_query(
     date_from: date | datetime | str | None = None,
     date_to: date | datetime | str | None = None,
+    date_field: str = "created_at",
 ) -> str:
-    """Build a bulk query with an explicit, safely formatted date range."""
+    """Build a bulk query with an explicit, safely formatted date range.
+
+    ``date_field`` picks which Shopify timestamp the range applies to. A
+    historical import wants ``created_at`` - give me the orders placed in this
+    period. Drift reconciliation wants ``updated_at``, because an order placed
+    months ago and fulfilled this morning has to come back round; filtering on
+    creation would never see it again.
+    """
+    if date_field not in ("created_at", "updated_at"):
+        raise ValueError(f"unsupported date field {date_field!r}")
     terms = []
     if date_from:
-        terms.append(f"created_at:>={_search_date(date_from)}")
+        terms.append(f"{date_field}:>={_search_date(date_from)}")
     if date_to:
-        terms.append(f"created_at:<={_search_date(date_to)}")
+        terms.append(f"{date_field}:<={_search_date(date_to)}")
     search = " ".join(terms)
     root = f'orders(query: "{search}")' if search else "orders"
     return "{ " + root + " { edges { node { id name updatedAt } } } }"
