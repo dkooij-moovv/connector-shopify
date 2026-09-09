@@ -531,8 +531,66 @@ class ShopifyOrderSync(models.Model):
             draft_binding.line_binding_ids.mapped("odoo_id").unlink()
             draft_binding.replaced_by_id = binding
         self._apply_lines(binding, sale_order, instance, order_data)
+        self._apply_fulfillments(binding, order_data)
         self._verify_total(sale_order, currency, instance, order_data)
         return sale_order
+
+    def _apply_fulfillments(self, binding, order_data):
+        """Record what Shopify shipped for this order.
+
+        Fulfillments used to arrive only through the fulfillments/create
+        webhook, so an install that cannot receive webhooks - anything behind
+        localhost, or one introduced onto a store with trading history - knew
+        nothing about what had ever left the warehouse. The table simply stayed
+        empty rather than erroring, which is why it went unnoticed.
+
+        Doing it here rather than in a job of its own needs no second
+        watermark: Shopify bumps an order's updated_at when its fulfillments
+        change, so the drift reconciliation already brings the right orders
+        back round. Measured over 400 changed orders, no fulfillment was ever
+        newer than its parent order's updated_at.
+
+        Nothing is validated in Odoo. These are records of what Shopify
+        shipped, not instructions to move stock.
+        """
+        shipments = order_data.get("fulfillments")
+        if not shipments:
+            # Absent (draft orders, REST webhooks) is not the same as none, so
+            # leave whatever is already recorded alone.
+            return
+        Fulfillment = self.env["shopify.fulfillment"].sudo()
+        existing = {
+            record.shopify_id: record
+            for record in Fulfillment.search([
+                ("instance_id", "=", binding.instance_id.id),
+                ("shopify_id", "in", [s["id"] for s in shipments if s.get("id")]),
+            ])
+        }
+        for shipment in shipments:
+            if not shipment.get("id"):
+                continue
+            values = {
+                "instance_id": binding.instance_id.id,
+                "company_id": binding.instance_id.company_id.id,
+                "order_binding_id": binding.id,
+                "shopify_id": shipment["id"],
+                "origin": "shopify",
+                "fulfillment_status": shipment.get("status") or False,
+                "location_shopify_id": shipment.get("location_id") or False,
+                "tracking_number": shipment.get("tracking_number") or False,
+                "tracking_company": shipment.get("tracking_company") or False,
+                "tracking_url": shipment.get("tracking_url") or False,
+                "external_updated_at": _utc_datetime(shipment.get("updated_at")),
+                "last_sync_date": fields.Datetime.now(),
+                "state": "synced",
+                "error_message": False,
+                "raw_payload": shipment,
+            }
+            record = existing.get(shipment["id"])
+            if record:
+                record.write(values)
+            else:
+                Fulfillment.create(values)
 
     def _shopify_order_extra_values(self, instance, order_data):
         """Allow optional modules to supply sale-order routing values."""

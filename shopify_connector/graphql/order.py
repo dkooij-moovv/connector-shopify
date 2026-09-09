@@ -43,6 +43,16 @@ ORDER_FIELDS = f"""
       assessments {{ riskLevel }}
       recommendation
     }}
+    fulfillments(first: 50) {{
+      id
+      name
+      createdAt
+      updatedAt
+      status
+      displayStatus
+      trackingInfo {{ number company url }}
+      location {{ id }}
+    }}
     lineItems(first: 250) {{
       nodes {{
         id

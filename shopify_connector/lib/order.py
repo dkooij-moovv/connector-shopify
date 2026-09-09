@@ -471,6 +471,23 @@ def _risk_level(payload: dict[str, Any]) -> str:
     return max(values or ["UNKNOWN"], key=lambda value: priority.get(value, 0))
 
 
+def _normalise_shipment(payload: dict[str, Any]) -> dict[str, Any]:
+    """One Shopify fulfillment: what left the warehouse, when, and how."""
+    tracking = (payload.get("trackingInfo") or [{}])[0] or {}
+    return {
+        "id": str(payload.get("id") or ""),
+        "name": str(payload.get("name") or ""),
+        "created_at": payload.get("createdAt"),
+        "updated_at": payload.get("updatedAt"),
+        "status": str(payload.get("status") or ""),
+        "display_status": str(payload.get("displayStatus") or ""),
+        "tracking_number": tracking.get("number") or "",
+        "tracking_company": tracking.get("company") or "",
+        "tracking_url": tracking.get("url") or "",
+        "location_id": str((payload.get("location") or {}).get("id") or ""),
+    }
+
+
 def normalize_order_payload(
     payload: dict[str, Any], *, is_draft: bool = False
 ) -> dict[str, Any]:
@@ -640,6 +657,13 @@ def normalize_order_payload(
             fallback_currency=currency,
         ),
         "lines": [_normalise_line(item, currency) for item in _nodes(line_source)],
+        # Shipment records. Present on the GraphQL order, absent on draft
+        # orders and on REST webhook payloads - absent is not the same as none.
+        "fulfillments": [
+            _normalise_shipment(item)
+            for item in (payload.get("fulfillments") or [])
+            if isinstance(item, dict)
+        ],
         "shipping_lines": [
             _normalise_shipping(item, currency) for item in _nodes(shipping_source)
         ],
