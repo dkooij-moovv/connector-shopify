@@ -267,3 +267,11 @@ class TestShopifyLibProduct(TransactionCase):
         content, message = ([object()], "line 1")
         with self.assertRaisesRegex(ShopifyProductPayloadError, message):
             parse_jsonl(content)
+
+
+    def test_signing_without_a_secret_says_so(self):
+        """An instance with no webhooks has no secret; signing must not sign with
+        an empty one, and must not crash three frames deep in an export job."""
+        with self.assertRaises(ValueError) as caught:
+            sign_product_image_path(False, 1, "product.product", 7, "abc")
+        self.assertIn("webhook secret", str(caught.exception))

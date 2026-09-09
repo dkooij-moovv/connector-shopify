@@ -24,7 +24,20 @@ def sign_product_image_path(
     record_id: int,
     checksum: str,
 ) -> str:
-    """Sign a narrow product-image download path for Shopify."""
+    """Sign a narrow product-image download path for Shopify.
+
+    The secret is the instance's webhook secret. An instance that has never
+    registered webhooks has none, and signing with an empty secret would make
+    the URL forgeable - so refuse, with a message that says what to do, rather
+    than calling .encode() on False and raising AttributeError three frames
+    deep in an export job.
+    """
+    if not secret:
+        raise ValueError(
+            "Cannot sign a product image URL: this Shopify instance has no "
+            "webhook secret. Register webhooks, or set one on the instance, "
+            "before exporting product images."
+        )
 
     message = f"{instance_id}:{model_name}:{record_id}:{checksum}".encode()
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
