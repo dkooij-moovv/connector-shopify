@@ -817,7 +817,7 @@ class ShopifyExternalFulfillmentImport(models.Model):
         values = {
             "instance_id": instance.id,
             "shopify_id": fulfillment_id,
-            "order_binding_id": order_binding_id,
+            "order_binding_id": order_binding.id,
             "fulfillment_status": str(
                 payload.get("status") or webhook_payload.get("status") or ""
             ).upper(),
