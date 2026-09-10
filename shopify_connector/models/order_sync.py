@@ -10,6 +10,7 @@ from odoo.fields import Command
 
 from ..graphql.order import (
     DRAFT_ORDER_BY_ID_QUERY,
+    _search_date,
     DRAFT_ORDERS_QUERY,
     ORDER_BY_ID_QUERY,
     REFUND_BY_ID_QUERY,
@@ -187,11 +188,13 @@ class ShopifyInstanceOrderSync(models.Model):
 
     def _queue_draft_orders(self, date_from=False, date_to=False,
                             date_field="created_at"):
+        # Same formatting as the bulk query: a datetime keeps its time, so a
+        # catch-up resumes from the minute here too rather than from midnight.
         query_terms = []
         if date_from:
-            query_terms.append(f"{date_field}:>={str(date_from)[:10]}")
+            query_terms.append(f"{date_field}:>={_search_date(date_from)}")
         if date_to:
-            query_terms.append(f"{date_field}:<={str(date_to)[:10]}")
+            query_terms.append(f"{date_field}:<={_search_date(date_to)}")
         after = None
         count = 0
         while True:

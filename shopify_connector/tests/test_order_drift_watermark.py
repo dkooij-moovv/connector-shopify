@@ -146,3 +146,104 @@ class TestShopifyOutstandingDemand(TransactionCase):
     def test_the_flag_off_keeps_the_ordered_quantity(self):
         self.instance.import_open_quantity_only = False
         self.assertEqual(self._demand(3, 1), 3)
+
+
+class TestShopifyDraftOrderPagination(TransactionCase):
+    """A catch-up can span pages. Nothing may be skipped, and a failure
+    halfway must not move the window past records nobody processed."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.instance = cls.env["shopify.instance"].create({
+            "name": "Paging Shop",
+            "shop_url": "paging-shop.myshopify.com",
+            "access_token": "test-token",
+            "state": "connected",
+        })
+
+    def _pages(self, aantal, valt_om_op=None):
+        """A fake client handing out `aantal` pages of one draft order each."""
+        bezocht = []
+
+        class Client:
+            def execute(_self, document, variables=None):
+                cursor = (variables or {}).get("after")
+                bladzijde = len(bezocht)
+                bezocht.append(cursor)
+                if valt_om_op is not None and bladzijde == valt_om_op:
+                    raise RuntimeError("Shopify fell over mid-pagination")
+                return {"draftOrders": {
+                    "nodes": [{
+                        "id": f"gid://shopify/DraftOrder/{bladzijde}",
+                        "name": f"#D{bladzijde}",
+                        "status": "OPEN",
+                        "createdAt": "2026-09-01T10:00:00Z",
+                        "currencyCode": "EUR",
+                        "lineItems": {"nodes": []},
+                    }],
+                    "pageInfo": {
+                        "hasNextPage": bladzijde + 1 < aantal,
+                        "endCursor": f"cursor-{bladzijde}",
+                    },
+                }}
+
+        return Client(), bezocht
+
+    def test_every_page_is_walked_and_nothing_skipped(self):
+        client, bezocht = self._pages(4)
+        with patch.object(type(self.instance), "_shopify_client", lambda _s: client):
+            aantal = self.instance._queue_draft_orders("2026-09-01 00:00:00")
+        self.assertEqual(aantal, 4, "one draft order per page should be queued")
+        self.assertEqual(
+            bezocht, [None, "cursor-0", "cursor-1", "cursor-2"],
+            "each request must carry the previous page's cursor",
+        )
+
+    def test_a_failure_on_a_later_page_does_not_advance_the_watermark(self):
+        """Page three dies. The watermark stays where it was, so the next run
+        reads the whole window again - duplicates are free, gaps are not."""
+        before = fields.Datetime.now() - timedelta(days=5)
+        self.instance.order_drift_watermark = before
+        client, _ = self._pages(5, valt_om_op=2)
+
+        with patch.object(type(self.instance), "_shopify_client", lambda _s: client), \
+             patch("odoo.addons.shopify_connector.models.order_sync.ShopifyBulkRunner") as runner:
+            runner.return_value.run.return_value = []
+            with self.assertRaises(RuntimeError):
+                self.instance._job_fetch_orders_bulk(
+                    "2026-09-01 00:00:00", False,
+                    date_field="updated_at",
+                    watermark=fields.Datetime.to_string(fields.Datetime.now()),
+                )
+        self.assertEqual(
+            self.instance.order_drift_watermark, before,
+            "a failure mid-pagination must leave the watermark untouched",
+        )
+
+    def test_a_missing_cursor_is_refused_rather_than_looping(self):
+        """hasNextPage without endCursor would spin forever on page one."""
+        class Broken:
+            def execute(_self, document, variables=None):
+                return {"draftOrders": {
+                    "nodes": [],
+                    "pageInfo": {"hasNextPage": True, "endCursor": None},
+                }}
+
+        with patch.object(type(self.instance), "_shopify_client", lambda _s: Broken()):
+            with self.assertRaises(Exception):
+                self.instance._queue_draft_orders("2026-09-01 00:00:00")
+
+    def test_a_datetime_window_reaches_the_draft_query_too(self):
+        """The bulk query keeps the time; the draft query must not drop it."""
+        gezien = {}
+
+        class Client:
+            def execute(_self, document, variables=None):
+                gezien["query"] = (variables or {}).get("query")
+                return {"draftOrders": {"nodes": [], "pageInfo": {"hasNextPage": False}}}
+
+        with patch.object(type(self.instance), "_shopify_client", lambda _s: Client()):
+            self.instance._queue_draft_orders(
+                "2026-09-09 18:32:05", False, date_field="updated_at")
+        self.assertIn("updated_at:>=2026-09-09T18:32:05Z", gezien["query"])
